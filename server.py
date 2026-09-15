@@ -29,11 +29,11 @@ def gen_referral_code():
 
 
 def add_bonus_hours(user_id, hours, reason=""):
-    """Начисляет бонусные часы пользователю и продлевает его активный ключ."""
+    """Начисляет бонусные часы пользователю и продлевает его активные ключи."""
     if hours <= 0 or not user_id:
         return
 
-    # Обновляем бонусные часы в профиле
+    # 1. Обновляем bonus_hours в профиле
     try:
         user = supabase.table("users").select("bonus_hours") \
             .eq("id", user_id).execute().data
@@ -45,7 +45,7 @@ def add_bonus_hours(user_id, hours, reason=""):
     except Exception as e:
         print("Ошибка обновления bonus_hours:", e)
 
-    # Продлеваем все активные ключи пользователя
+    # 2. Продлеваем все активные ключи этого пользователя
     try:
         keys = supabase.table("keys").select("*").eq("user_id", user_id).execute().data
         for k in keys:
@@ -61,11 +61,11 @@ def add_bonus_hours(user_id, hours, reason=""):
     except Exception as e:
         print("Ошибка выборки ключей:", e)
 
-    # Записываем в лог
+    # 3. Пишем в лог
     try:
         supabase.table("bonus_log").insert({
             "user_code": str(user_id),
-            "days": hours,          # оставляем старое имя, чтобы не ломать таблицу
+            "days": hours,
             "reason": reason,
             "created_at": datetime.now().isoformat()
         }).execute()
@@ -78,24 +78,19 @@ def check_and_unlock_achievements(user_id):
     if not user_id:
         return
 
-    # Получаем данные пользователя
     user_data = supabase.table("users").select("*") \
         .eq("id", user_id).execute().data
     if not user_data:
         return
     user = user_data[0]
 
-    # Уже разблокированные
     unlocked = supabase.table("user_achievements") \
         .select("achievement_code") \
         .eq("user_id", user_id).execute().data
     unlocked_codes = {u["achievement_code"] for u in unlocked}
 
-    # Список достижений
     achievements = supabase.table("achievements").select("*").execute().data
 
-    # Считаем статистику
-    keys = supabase.table("keys").select("*").eq("user_id", user_id).execute().data
     referrals = supabase.table("referrals") \
         .select("*").eq("referrer_code", user["referral_code"]).execute().data
 
@@ -103,14 +98,12 @@ def check_and_unlock_achievements(user_id):
     total_clicks = user.get("total_clicks", 0) or 0
     invited = len(referrals)
 
-    # Вычисляем, сколько дней пользователь с нами
     try:
         created = datetime.fromisoformat(user.get("created_at"))
         days_with_us = (datetime.now() - created).days
     except:
         days_with_us = 0
 
-    # Телепорты приблизительно считаем по кликам
     teleports = total_clicks
 
     for a in achievements:
@@ -167,15 +160,15 @@ def validate():
 
     expiry = row.get("expiry")
     if expiry == "forever":
-        return jsonify({"valid": True, "message": "Ключ действителен (навсегда)",
+        return jsonify({"valid": True,
+                        "message": "Ключ действителен (навсегда)",
                         "expiry": "forever"}), 200
 
     try:
         exp = datetime.fromisoformat(expiry)
         if datetime.now() > exp:
             return jsonify({"valid": False, "message": "Ключ истёк"}), 200
-        delta = exp - datetime.now()
-        hours_left = delta.total_seconds() / 3600
+        hours_left = (exp - datetime.now()).total_seconds() / 3600
         return jsonify({
             "valid": True,
             "message": f"Действителен ({hours_left:.1f} ч.)",
@@ -196,7 +189,6 @@ def activate():
     if not key:
         return jsonify({"valid": False, "message": "Ключ не указан"}), 400
 
-    # Ищем ключ
     result = supabase.table("keys").select("*").eq("key", key).execute()
     if not result.data:
         return jsonify({"valid": False, "message": "Неверный ключ"}), 200
@@ -205,7 +197,6 @@ def activate():
     if row.get("banned"):
         return jsonify({"valid": False, "message": "Ключ заблокирован"}), 200
 
-    # Проверка срока
     expiry = row.get("expiry")
     if expiry and expiry != "forever":
         try:
@@ -216,36 +207,34 @@ def activate():
 
     user_id = row.get("user_id")
 
-    # Если ключ новый и указан реферальный код — активируем
+    # Новый ключ — создаём пользователя
     if not user_id:
-        # Создаём пользователя
         my_code = gen_referral_code()
         new_user = supabase.table("users").insert({
             "referral_code": my_code,
             "referred_by": ref_code if ref_code else None,
             "bonus_hours": 0,
+            "hours_in_app": 0,
+            "total_clicks": 0,
             "created_at": datetime.now().isoformat()
         }).execute()
         new_user_id = new_user.data[0]["id"]
 
-        # Привязываем ключ к пользователю
         supabase.table("keys").update({
             "user_id": new_user_id,
             "activated": datetime.now().isoformat()
         }).eq("key", key).execute()
 
-        # Обработка реферала
+        # Реферальная логика
         if ref_code:
             ref_user = supabase.table("users").select("*") \
                 .eq("referral_code", ref_code).execute().data
             if ref_user:
                 referrer_id = ref_user[0]["id"]
 
-                # Рефереру +24 часа, приглашённому +1 час
                 add_bonus_hours(referrer_id, 24, reason="referral_referrer")
                 add_bonus_hours(new_user_id, 1, reason="referral_invited")
 
-                # Записываем реферал
                 supabase.table("referrals").insert({
                     "referrer_code": ref_code,
                     "referred_user_id": new_user_id,
@@ -253,7 +242,7 @@ def activate():
                     "created_at": datetime.now().isoformat()
                 }).execute()
 
-                # Ежедневное задание "пригласить друга" — обновляем
+                # Ежедневное задание "daily_referral"
                 today = datetime.now().strftime("%Y-%m-%d")
                 existing = supabase.table("user_daily_progress") \
                     .select("*").eq("user_id", referrer_id) \
@@ -274,10 +263,8 @@ def activate():
                         "completed_at": datetime.now().isoformat(),
                         "date": today
                     }).execute()
-                    # Первое приглашение за день — +1 час
                     add_bonus_hours(referrer_id, 1, reason="daily_referral")
 
-        # Проверяем достижения
         check_and_unlock_achievements(new_user_id)
 
         return jsonify({
@@ -287,7 +274,6 @@ def activate():
             "my_referral_code": my_code
         }), 200
 
-    # Ключ уже привязан к пользователю
     check_and_unlock_achievements(user_id)
     return jsonify({
         "valid": True,
@@ -312,11 +298,9 @@ def me():
         return jsonify({"exists": False}), 200
     user = user_data[0]
 
-    # Рефералы
     referrals = supabase.table("referrals") \
         .select("*").eq("referrer_code", user["referral_code"]).execute().data
 
-    # Достижения
     all_ach = supabase.table("achievements").select("*").execute().data
     unlocked = supabase.table("user_achievements") \
         .select("achievement_code, unlocked_at") \
@@ -334,7 +318,6 @@ def me():
             "unlocked_at": unlocked_map.get(a["code"])
         })
 
-    # Ежедневные задания на сегодня
     today = datetime.now().strftime("%Y-%m-%d")
     daily_tasks = supabase.table("daily_tasks").select("*").execute().data
     progress = supabase.table("user_daily_progress") \
@@ -396,7 +379,6 @@ def daily_login():
         "date": today
     }).execute()
 
-    # Награда: 0 часов по заданию пользователя, но можно поставить своё
     add_bonus_hours(user_id, 0, reason="daily_login")
     return jsonify({"success": True, "message": "Задание выполнено"}), 200
 
@@ -457,9 +439,7 @@ def stats_update():
         "total_clicks": new_clicks
     }).eq("id", user_id).execute()
 
-    # Проверяем достижения после обновления
     check_and_unlock_achievements(user_id)
-
     return jsonify({"success": True}), 200
 
 
